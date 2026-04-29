@@ -118,16 +118,15 @@ When a visitor shows genuine interest but isn't ready to book, your job is to ge
 
 **How to collect info — always feel like a person, never a form:**
 1. Name first: "What's your name, by the way?" — casual, never formal
-2. Then contact: "What's the best way for the team to follow up — email, or a quick call?"
+2. Then contact: "What's the best way for the team to follow up — email, or a quick call?" — always ask this after getting their name, no exceptions
 3. One method is enough — email OR phone, not both required
-4. If they only give a name with no contact, still call capture_lead — something is always better than nothing
-5. Never ask for name and contact in the same message. One at a time, naturally.
+4. Never ask for name and contact in the same message. One at a time, naturally.
 
-**Call capture_lead as soon as you have a name OR any contact info**, even if incomplete. Don't wait for a perfect dataset. Pass everything they've shared: name, email, phone, services mentioned, and a 1-2 sentence summary of what they're looking for.
+**Call capture_lead only after you have at least a name AND one contact method (email or phone).** If they give a name but won't share contact info, make one more warm attempt: "Even just an email works — that way the team can send over some info when they have a moment." Only skip contact if they explicitly refuse after being asked.
 
 **After capturing:** "Perfect — I've passed your info to the team and someone will be in touch soon. Feel free to keep asking me anything in the meantime!"
 
-Rule: A visitor who leaves without any contact info is a missed opportunity. Always try at least once. Be warm about it, never pushy — but always try.
+Rule: A visitor who leaves without any contact info is a missed opportunity. Always ask for at least one contact method. Be warm about it, never pushy — but always ask.
 
 ## Never Do
 - Never quote specific pricing
@@ -147,7 +146,6 @@ export default function Chatbot() {
   const [conversationHistory, setConversationHistory] = useState<LLMMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [streamingContent, setStreamingContent] = useState("");
   const [hasOpened, setHasOpened] = useState(false);
   const [showNudge, setShowNudge] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -156,10 +154,6 @@ export default function Chatbot() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [displayMessages, isLoading]);
-
-  useEffect(() => {
-    if (streamingContent) messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
-  }, [streamingContent]);
 
   useEffect(() => {
     if (isOpen) inputRef.current?.focus();
@@ -186,8 +180,7 @@ export default function Chatbot() {
   };
 
   const callLLM = async (
-    messages: LLMMessage[],
-    onToken: (token: string) => void
+    messages: LLMMessage[]
   ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> => {
     const response = await fetch("/api/chat", {
       method: "POST",
@@ -197,75 +190,33 @@ export default function Chatbot() {
         messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
         temperature: 0.7,
         max_tokens: 500,
-        stream: true,
         tools: toolDefinitions,
       }),
     });
 
-    if (!response.body) throw new Error("No response body");
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
-    let content = "";
-    const tcMap: Record<number, { id: string; name: string; arguments: string }> = {};
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const raw = line.slice(6).trim();
-        if (raw === "[DONE]") continue;
-
-        let chunk: {
-          choices?: Array<{
-            delta?: {
-              content?: string;
-              tool_calls?: Array<{
-                index: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }>;
-            };
-          }>;
+    const data: {
+      error?: { message?: string };
+      choices?: Array<{
+        finish_reason?: string;
+        message?: {
+          content?: string | null;
+          tool_calls?: ToolCall[];
         };
-        try { chunk = JSON.parse(raw); } catch { continue; }
+      }>;
+    } = await response.json();
 
-        const delta = chunk.choices?.[0]?.delta;
-        if (!delta) continue;
+    console.log("Groq response:", JSON.stringify(data, null, 2));
 
-        if (delta.content) {
-          content += delta.content;
-          onToken(delta.content);
-        }
-
-        if (delta.tool_calls) {
-          for (const tc of delta.tool_calls) {
-            if (!tcMap[tc.index]) tcMap[tc.index] = { id: "", name: "", arguments: "" };
-            if (tc.id) tcMap[tc.index].id = tc.id;
-            if (tc.function?.name) tcMap[tc.index].name += tc.function.name;
-            if (tc.function?.arguments) tcMap[tc.index].arguments += tc.function.arguments;
-          }
-        }
-      }
+    if (!response.ok || data.error) {
+      throw new Error(data.error?.message ?? `HTTP ${response.status}`);
     }
 
-    const toolCalls = Object.keys(tcMap).length > 0
-      ? Object.values(tcMap).map((tc) => ({
-          id: tc.id,
-          type: "function" as const,
-          function: { name: tc.name, arguments: tc.arguments },
-        }))
-      : undefined;
-
-    return { content: content || null, tool_calls: toolCalls };
+    const choice = data.choices?.[0];
+    const message = choice?.message;
+    return {
+      content: message?.content ?? null,
+      tool_calls: message?.tool_calls,
+    };
   };
 
   const QUICK_REPLIES = [
@@ -291,21 +242,13 @@ export default function Chatbot() {
       { role: "user", content: userMessage },
     ];
     setIsLoading(true);
-    setStreamingContent("");
 
     try {
       let maxIterations = 5;
       while (maxIterations > 0) {
         maxIterations--;
 
-        let accumulated = "";
-        const result = await callLLM(history, (token) => {
-          accumulated += token;
-          setStreamingContent(accumulated);
-        });
-
-        // Clear the streaming buffer before any state update
-        setStreamingContent("");
+        const result = await callLLM(history);
 
         if (result.tool_calls && result.tool_calls.length > 0) {
           history = [
@@ -336,7 +279,6 @@ export default function Chatbot() {
         break;
       }
     } catch {
-      setStreamingContent("");
       setDisplayMessages([
         ...newDisplay,
         {
@@ -347,7 +289,6 @@ export default function Chatbot() {
       ]);
     } finally {
       setIsLoading(false);
-      setStreamingContent("");
     }
   };
 
@@ -403,18 +344,8 @@ export default function Chatbot() {
               </div>
             ))}
 
-            {/* Streaming text response */}
-            {streamingContent && (
-              <div className="flex justify-start">
-                <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed font-[family-name:var(--font-body)] bg-dg-cream text-dg-text">
-                  {streamingContent}
-                  <span className="inline-block w-[2px] h-[14px] bg-dg-pink/70 ml-0.5 align-middle animate-pulse rounded-sm" />
-                </div>
-              </div>
-            )}
-
-            {/* Loading dots — only while waiting before any text arrives */}
-            {isLoading && !streamingContent && (
+            {/* Loading dots */}
+            {isLoading && (
               <div className="flex justify-start">
                 <div className="bg-dg-cream text-dg-text rounded-2xl rounded-bl-md px-4 py-3 flex gap-1.5">
                   <span
